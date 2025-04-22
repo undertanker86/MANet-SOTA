@@ -282,6 +282,47 @@ def plot_training_history(train_losses, val_losses, train_accs, val_accs):
     plt.close()  # Close figure to prevent overlap
 
     # Show both plots
+def modified_manet_with_pretrain(num_classes=7):
+    # Tạo model gốc
+    model = manet()
+    
+    # Load pretrained weights
+    checkpoint = torch.load('/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/Pretrained_on_MSCeleb.pth.tar', weights_only=False)
+    pre_trained_dict = checkpoint['state_dict']
+    
+    # Kiểm tra xem có prefix 'module.' không (nếu mô hình được lưu từ DataParallel)
+    if list(pre_trained_dict.keys())[0].startswith('module.'):
+        # Nếu có, xóa 'module.' prefix
+        pre_trained_dict = {k.replace('module.', ''): v for k, v in pre_trained_dict.items()}
+    
+    # Thử tải weights với strict=False để bỏ qua các key không khớp
+    model.load_state_dict(pre_trained_dict, strict=False)
+    
+    # Giờ hãy sửa lớp conv1 để hỗ trợ 4 channels
+    original_conv = model.conv1
+    
+    # Tạo lớp conv mới với 4 kênh đầu vào
+    new_conv = nn.Conv2d(
+        4,  # 4 kênh đầu vào (RGB + heatmap)
+        64,  # Giữ nguyên số kênh đầu ra
+        kernel_size=7, 
+        stride=2, 
+        padding=3, 
+        bias=False
+    )
+    
+    # Khởi tạo lớp mới với trọng số từ lớp cũ
+    with torch.no_grad():
+        # Sao chép trọng số cho các kênh RGB
+        new_conv.weight[:, :3] = original_conv.weight
+        
+        # Khởi tạo trọng số kênh heatmap là giá trị trung bình của trọng số RGB
+        new_conv.weight[:, 3:] = original_conv.weight.mean(dim=1, keepdim=True)
+    
+    # Thay thế lớp conv ban đầu
+    model.conv1 = new_conv
+    
+    return model
 def count_parameters(model):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -297,9 +338,9 @@ def main():
     #model = modified_manet(num_classes=7)
     #model = torch.nn.DataParallel(model).cuda()
         # Tạo model đã sửa đổi để nhận đầu vào 4 channels
-    model = modified_manet_not_pre(num_classes=7)
+    #model = modified_manet_not_pre(num_classes=7)
+    model = modified_manet_with_pretrain(num_classes=7)
     model = torch.nn.DataParallel(model).cuda()
-    count_parameters(model)
     # create model
     #checkpoint = torch.load('/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/Pretrained_on_MSCeleb.pth.tar', weights_only=False)
     #pre_trained_dict = checkpoint['state_dict']
@@ -315,7 +356,9 @@ def main():
     #for k, v in pre_trained_dict.items():
         #if 'fc_1' not in k and 'fc_2' not in k and 'conv1' not in k:
             #filtered_dict[k] = v
-    
+    model.module.fc_1 = torch.nn.Linear(512, 7).cuda()
+    model.module.fc_2 = torch.nn.Linear(512, 7).cuda()
+    count_parameters(model)
     # Load trọng số đã lọc
     #model.load_state_dict(filtered_dict, strict=False)
     # define loss function (criterion) and optimizer
