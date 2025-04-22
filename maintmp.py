@@ -67,11 +67,12 @@ class FERPlusDataset(Dataset):
         self.global_std = [0.229, 0.224, 0.225]
 
         # Prepare dataset
-        self.images, self.labels = self._load_dataset()
-
+        #self.images, self.labels = self._load_dataset()
+        self.images, self.labels, self.heat_images = self._load_dataset()
         # Print dataset statistics
         self._print_statistics()
-                # Prepare transforms
+
+        # Prepare transforms
         self.base_transform = transforms.Compose([
             transforms.ToPILImage(),
             transforms.Resize(self.image_size),
@@ -83,15 +84,12 @@ class FERPlusDataset(Dataset):
         ])
 
         # Additional train transforms
-        if transform_type == 'train':
-            self.train_transform = transforms.Compose([
+        self.train_transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomRotation(10),
-                transforms.RandomErasing(scale=(0.02, 0.1))
+                #transforms.RandomErasing(scale=(0.02, 0.1))
             ])
-        else:
-            # Identity transform for validation/test
-            self.train_transform = lambda x: x
+
 
     def _load_dataset(self):
         """Load dataset from preprocessed .npz file"""
@@ -99,11 +97,12 @@ class FERPlusDataset(Dataset):
 
         try:
             data = np.load(saved_data_path)
-            return data['images'], data['labels']
+            return data['images'], data['labels'], data['heatmaps']
 
         except Exception as e:
             print(f"Error loading dataset: {e}")
-            return [], []
+            return [], [], []
+
     def _print_statistics(self):
         """Print dataset statistics"""
         unique_labels, counts = np.unique(self.labels, return_counts=True)
@@ -116,6 +115,17 @@ class FERPlusDataset(Dataset):
             emotion = EMOTION_MAPPING.get(label, f"Unknown({label})")
             percentage = (count / total_images) * 100
             print(f"{emotion}: {count} images ({percentage:.2f}%)")
+    @staticmethod
+    # Apply for numpy
+    def normalize_sparse_heatmap(heatmap):
+        if heatmap.max() <= 1e-8:
+            return heatmap
+        mask = heatmap > 1e-5 * heatmap.max()
+        if mask.sum() > 10:
+            p_max = np.percentile(heatmap[mask], 99)
+            return np.clip(heatmap / p_max, 0, 1)
+        else:
+            return heatmap / (heatmap.max() + 1e-8)
 
     def __len__(self):
         return len(self.images)
@@ -124,12 +134,124 @@ class FERPlusDataset(Dataset):
         # Load image, label
         image = self.images[idx]
         label = self.labels[idx] - 1  # Adjust to 0-indexed classes
-
+        heatmap = self.heat_images[idx]
+        transformed_heatmap = self.normalize_sparse_heatmap(heatmap)
+        transformed_heatmap = self.base_transform(transformed_heatmap)
         # Transform image
         transformed_image = self.image_transform(image)
-        transformed_image = self.train_transform(transformed_image)
+        # print("ảnh sau biến đổi:", transformed_image.shape)  # 3x224x224
+        four_channel = torch.cat([transformed_image, transformed_heatmap], dim=0)
+        if self.transform_type == 'train':
+            # Concatenate image and heatmap
+            #four_channel = torch.cat([transformed_image, transformed_heatmap], dim=0)
+            # print("sau khi ghép:", four_channel.shape)  #  4x224x224
 
-        return transformed_image, label
+            # Apply random transformations
+            four_channel = self.train_transform(four_channel)
+
+            # Separate image and heatmap
+            #transformed_image = four_channel[0:3, :, :]  # 3 channels
+            #transformed_heatmap = four_channel[3:, :, :]  # rest is heatmap
+        return four_channel, label
+def visualize_heatmaps(train_loader, num_samples=5, output_path="./outputs/heatmap_visualization.png"):
+    # Get a batch of samples
+    dataiter = iter(train_loader)
+    batch = next(dataiter)
+
+    # Unpack the batch
+    images, labels = batch  # images: [B, 4, 224, 224]
+
+    print(f"Images shape: {images.shape}")
+
+    # Number of samples to visualize
+    num_vis = min(num_samples, len(images))
+
+    # Create plot
+    fig, axes = plt.subplots(num_vis, 2, figsize=(10, 4 * num_vis))
+
+    # If only one sample, wrap axes in a list
+    if num_vis == 1:
+        axes = [axes]
+
+    for i in range(num_vis):
+        img4ch = images[i].cpu()  # [4, H, W]
+        lbl = labels[i].item()
+
+        # Tách ảnh RGB và heatmap
+        rgb = img4ch[0:3, :, :]
+        heatmap = img4ch[3, :, :]
+
+        # Convert RGB to numpy and denormalize
+        img_np = rgb.permute(1, 2, 0).numpy()
+        img_np = img_np * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406])
+        img_np = np.clip(img_np, 0, 1)
+
+        # Convert heatmap to numpy
+        hm_np = heatmap.numpy()
+
+        # Plot RGB image
+        axes[i][0].imshow(img_np)
+        axes[i][0].set_title(f"Image (Label: {EMOTION_MAPPING.get(lbl + 1, lbl + 1)})")
+        axes[i][0].axis('off')
+
+        # Plot heatmap
+        axes[i][1].imshow(hm_np, cmap='jet')
+        axes[i][1].set_title("Heatmap")
+        axes[i][1].axis('off')
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved visualization to {output_path}")
+def modified_manet_not_pre(num_classes=7):
+    # Tạo model gốc
+    model = manet()
+    
+    # Thay thế lớp conv1 để nhận 4 channels
+    model.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    
+    # Khởi tạo lại weights cho lớp conv1
+    nn.init.kaiming_normal_(model.conv1.weight, mode='fan_out', nonlinearity='relu')
+    
+    # Thay đổi fc layers
+    model.fc_1 = nn.Linear(512, num_classes)
+    model.fc_2 = nn.Linear(512, num_classes)
+    
+    return model
+def modified_manet(num_classes=7):
+    # Sử dụng hàm manet() để tạo model thay vì gọi trực tiếp lớp MANet
+    model = manet()
+    
+    # Lấy lớp conv đầu tiên
+    original_conv = model.conv1
+    
+    # Tạo lớp conv mới với 4 kênh đầu vào thay vì 3
+    new_conv = nn.Conv2d(
+        4,  # 4 kênh đầu vào (RGB + heatmap)
+        64,  # Giữ nguyên số kênh đầu ra
+        kernel_size=7, 
+        stride=2, 
+        padding=3, 
+        bias=False
+    )
+    
+    # Khởi tạo lớp mới với trọng số từ lớp cũ
+    with torch.no_grad():
+        # Sao chép trọng số cho các kênh RGB
+        new_conv.weight[:, :3] = original_conv.weight
+        
+        # Khởi tạo trọng số kênh heatmap là giá trị trung bình của trọng số RGB
+        new_conv.weight[:, 3:] = original_conv.weight.mean(dim=1, keepdim=True)
+    
+    # Thay thế lớp conv ban đầu
+    model.conv1 = new_conv
+    
+    # Cập nhật lớp fully connected
+    model.fc_1 = nn.Linear(512, num_classes)
+    model.fc_2 = nn.Linear(512, num_classes)
+    
+    return model
 def plot_training_history(train_losses, val_losses, train_accs, val_accs):
     """Plot training and validation metrics and save figures separately."""
 
@@ -160,32 +282,42 @@ def plot_training_history(train_losses, val_losses, train_accs, val_accs):
     plt.close()  # Close figure to prevent overlap
 
     # Show both plots
-    plt.show()
 def count_parameters(model):
-    """Count trainable and total parameters of the model"""
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
 
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Non-trainable parameters: {total_params - trainable_params:,}")
     print(f"Total parameters: {total_params:,}")
-    
 def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     best_acc = 0
     print('Training time: ' + now.strftime("%m-%d %H:%M"))
-
-    # create model
-    model = manet()
-    #count_parameters(model)
-    #count_parameters(model)
+    # Create modified model that accepts 4-channel input
+    #model = modified_manet(num_classes=7)
+    #model = torch.nn.DataParallel(model).cuda()
+        # Tạo model đã sửa đổi để nhận đầu vào 4 channels
+    model = modified_manet_not_pre(num_classes=7)
     model = torch.nn.DataParallel(model).cuda()
-    checkpoint = torch.load('/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/Pretrained_on_MSCeleb.pth.tar', weights_only=False)
-    pre_trained_dict = checkpoint['state_dict']
-    model.load_state_dict(pre_trained_dict)
-    model.module.fc_1 = torch.nn.Linear(512, 7).cuda()
-    model.module.fc_2 = torch.nn.Linear(512, 7).cuda()
     count_parameters(model)
+    # create model
+    #checkpoint = torch.load('/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/Pretrained_on_MSCeleb.pth.tar', weights_only=False)
+    #pre_trained_dict = checkpoint['state_dict']
+    #pretrained_path = '/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/Pretrained_on_MSCeleb.pth.tar'
+    #model.load_state_dict(pre_trained_dict)
+    #model_dict = model.state_dict()
+    #pretrained_dict = {k: v for k, v in pre_trained_dict.items() if k in model_dict and 'conv1' not in k}
+    #model_dict.update(pretrained_dict)
+    
+    # Load the filtered dict
+    #model.load_state_dict(model_dict, strict=False)
+    #filtered_dict = {}
+    #for k, v in pre_trained_dict.items():
+        #if 'fc_1' not in k and 'fc_2' not in k and 'conv1' not in k:
+            #filtered_dict[k] = v
+    
+    # Load trọng số đã lọc
+    #model.load_state_dict(filtered_dict, strict=False)
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
     optimizer = torch.optim.SGD(model.parameters(),  args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -218,7 +350,9 @@ def main():
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=2)
+
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=2)
+    visualize_heatmaps(train_loader, num_samples=5)
     #train_dataset = datasets.ImageFolder(traindir,
       #                                   transforms.Compose([transforms.RandomResizedCrop((224, 224)),
      #                                                        transforms.RandomHorizontalFlip(),
@@ -245,7 +379,7 @@ def main():
     train_losses = []
     val_losses = []
     train_accs = []
-    val_accs = []  
+    val_accs = []
     for epoch in range(args.start_epoch, args.epochs):
         start_time = time.time()
         current_learning_rate = optimizer.state_dict()['param_groups'][0]['lr']

@@ -1,0 +1,42 @@
+# Ignore outputs and visualizations
+outputs/
+log/
+*.png
+
+# Ignore checkpoints
+checkpoint/
+model/
+
+# Ignore data files
+data/
+*.npz
+*.csv
+*.json
+
+# SLURM job outputs
+slurm-*.out
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.so
+
+# Temporary / backup / swap files
+*~
+*.swp
+*.tmp
+*.save
+
+# VSCode / IDE configs (optional)
+.vscode/
+.idea/
+
+# Environment files (optional)
+.env
+*.egg-info/
+dist/
+build/
+
+# OS-specific files
+.DS_Store
+Thumbs.db

@@ -30,7 +30,7 @@ parser.add_argument('--data', type=str, default='/data2/cmdir/home/ioit_thql/QDH
 parser.add_argument('--checkpoint_path', type=str, default='/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/' + 'model.pth')
 parser.add_argument('--best_checkpoint_path', type=str, default='/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/'+'model_best.pth')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N', help='number of data loading workers')
-parser.add_argument('--epochs', default=60, type=int, metavar='N', help='number of total epochs to run')
+parser.add_argument('--epochs', default=1, type=int, metavar='N', help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=128, type=int, metavar='N')
 parser.add_argument('--lr', '--learning-rate', default=0.01, type=float, metavar='LR', dest='lr')
@@ -67,11 +67,12 @@ class FERPlusDataset(Dataset):
         self.global_std = [0.229, 0.224, 0.225]
 
         # Prepare dataset
-        self.images, self.labels = self._load_dataset()
-
+        #self.images, self.labels = self._load_dataset()
+        self.images, self.labels, self.heat_images = self._load_dataset()
         # Print dataset statistics
         self._print_statistics()
-                # Prepare transforms
+
+        # Prepare transforms
         self.base_transform = transforms.Compose([
             transforms.ToPILImage(),
             transforms.Resize(self.image_size),
@@ -83,15 +84,12 @@ class FERPlusDataset(Dataset):
         ])
 
         # Additional train transforms
-        if transform_type == 'train':
-            self.train_transform = transforms.Compose([
+        self.train_transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomRotation(10),
                 transforms.RandomErasing(scale=(0.02, 0.1))
             ])
-        else:
-            # Identity transform for validation/test
-            self.train_transform = lambda x: x
+
 
     def _load_dataset(self):
         """Load dataset from preprocessed .npz file"""
@@ -99,11 +97,12 @@ class FERPlusDataset(Dataset):
 
         try:
             data = np.load(saved_data_path)
-            return data['images'], data['labels']
+            return data['images'], data['labels'], data['heatmaps']
 
         except Exception as e:
             print(f"Error loading dataset: {e}")
-            return [], []
+            return [], [], []
+
     def _print_statistics(self):
         """Print dataset statistics"""
         unique_labels, counts = np.unique(self.labels, return_counts=True)
@@ -116,6 +115,17 @@ class FERPlusDataset(Dataset):
             emotion = EMOTION_MAPPING.get(label, f"Unknown({label})")
             percentage = (count / total_images) * 100
             print(f"{emotion}: {count} images ({percentage:.2f}%)")
+    @staticmethod
+    # Apply for numpy
+    def normalize_sparse_heatmap(heatmap):
+        if heatmap.max() <= 1e-8:
+            return heatmap
+        mask = heatmap > 1e-5 * heatmap.max()
+        if mask.sum() > 10:
+            p_max = np.percentile(heatmap[mask], 99)
+            return np.clip(heatmap / p_max, 0, 1)
+        else:
+            return heatmap / (heatmap.max() + 1e-8)
 
     def __len__(self):
         return len(self.images)
@@ -124,12 +134,61 @@ class FERPlusDataset(Dataset):
         # Load image, label
         image = self.images[idx]
         label = self.labels[idx] - 1  # Adjust to 0-indexed classes
-
+        heatmap = self.heat_images[idx]
+        transformed_heatmap = self.normalize_sparse_heatmap(heatmap)
+        transformed_heatmap = self.base_transform(transformed_heatmap)
         # Transform image
         transformed_image = self.image_transform(image)
-        transformed_image = self.train_transform(transformed_image)
+        # print("ảnh sau biến đổi:", transformed_image.shape)  # 3x224x224
+        four_channel = torch.cat([transformed_image, transformed_heatmap], dim=0)
+        if self.transform_type == 'train':
+            # Concatenate image and heatmap
+            #four_channel = torch.cat([transformed_image, transformed_heatmap], dim=0)
+            # print("sau khi ghép:", four_channel.shape)  #  4x224x224
 
-        return transformed_image, label
+            # Apply random transformations
+            four_channel = self.train_transform(four_channel)
+
+            # Separate image and heatmap
+            #transformed_image = four_channel[0:3, :, :]  # 3 channels
+            #transformed_heatmap = four_channel[3:, :, :]  # rest is heatmap
+        return four_channel, label
+import torch.nn as nn
+def load_pretrained_ignore_conv1_dict(model, state_dict):
+    for k in list(state_dict.keys()):
+        if k.endswith('conv1.weight') and state_dict[k].shape[1] != 4:
+            del state_dict[k]
+    model.load_state_dict(state_dict, strict=True)
+    return model
+
+
+def patch_manet_conv1_to_4ch(model):
+    old_conv = model.module.conv1 if isinstance(model, nn.DataParallel) else model.conv1
+    orig_weight = old_conv.weight.clone()
+
+    new_conv = nn.Conv2d(
+        in_channels=4,
+        out_channels=old_conv.out_channels,
+        kernel_size=old_conv.kernel_size,
+        stride=old_conv.stride,
+        padding=old_conv.padding,
+        bias=False
+    )
+
+    with torch.no_grad():
+        new_conv.weight[:, :3] = orig_weight
+        new_conv.weight[:, 3] = orig_weight.mean(dim=1)
+
+    # ✅ Đưa new_conv lên GPU trước khi gán
+    new_conv = new_conv.cuda()
+
+    if isinstance(model, nn.DataParallel):
+        model.module.conv1 = new_conv
+    else:
+        model.conv1 = new_conv
+
+    return model
+
 def plot_training_history(train_losses, val_losses, train_accs, val_accs):
     """Plot training and validation metrics and save figures separately."""
 
@@ -160,9 +219,7 @@ def plot_training_history(train_losses, val_losses, train_accs, val_accs):
     plt.close()  # Close figure to prevent overlap
 
     # Show both plots
-    plt.show()
 def count_parameters(model):
-    """Count trainable and total parameters of the model"""
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
 
@@ -178,14 +235,18 @@ def main():
     # create model
     model = manet()
     #count_parameters(model)
-    #count_parameters(model)
+    model = patch_manet_conv1_to_4ch(model)    
     model = torch.nn.DataParallel(model).cuda()
+    #model = patch_manet_conv1_to_4ch(model)
+    count_parameters(model)
     checkpoint = torch.load('/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/Pretrained_on_MSCeleb.pth.tar', weights_only=False)
     pre_trained_dict = checkpoint['state_dict']
-    model.load_state_dict(pre_trained_dict)
+    #pretrained_path = '/data2/cmdir/home/ioit_thql/QDHManet/MA-Net/checkpoint/Pretrained_on_MSCeleb.pth.tar'
+    #model.load_state_dict(pre_trained_dict)
+    model = load_pretrained_ignore_conv1_dict(model, pre_trained_dict)
     model.module.fc_1 = torch.nn.Linear(512, 7).cuda()
     model.module.fc_2 = torch.nn.Linear(512, 7).cuda()
-    count_parameters(model)
+
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
     optimizer = torch.optim.SGD(model.parameters(),  args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -245,7 +306,7 @@ def main():
     train_losses = []
     val_losses = []
     train_accs = []
-    val_accs = []  
+    val_accs = []
     for epoch in range(args.start_epoch, args.epochs):
         start_time = time.time()
         current_learning_rate = optimizer.state_dict()['param_groups'][0]['lr']
