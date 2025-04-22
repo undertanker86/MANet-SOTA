@@ -19,4 +19,4 @@ conda activate qdhposterv2
 cd $HOME/QDHManet/MA-Net
 
 # Run the script
-python maintmp.py
+python main_not_pre.py
