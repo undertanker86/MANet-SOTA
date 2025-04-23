@@ -232,9 +232,9 @@ def modified_manet_with_pretrain(num_classes=7):
     if list(pre_trained_dict.keys())[0].startswith('module.'):
         # Nếu có, xóa 'module.' prefix
         pre_trained_dict = {k.replace('module.', ''): v for k, v in pre_trained_dict.items()}
-    # Thử tải weights với strict=False để bỏ qua các key không khớp
+    # tải weights với strict=False để bỏ qua các key không khớp
     model.load_state_dict(pre_trained_dict, strict=False)        
-    # Giờ hãy sửa lớp conv1 để hỗ trợ 1 channel
+    # sửa lớp conv1 để hỗ trợ 1 channel
     original_conv = model.conv1
     # Tạo lớp conv mới với 1 kênh đầu vào
     new_conv = nn.Conv2d(

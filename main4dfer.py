@@ -183,9 +183,9 @@ def visualize_heatmaps(train_loader, num_samples=5, output_path="./outputs/heatm
         # Tách ảnh grayscale và heatmap
         gray = img2ch[0, :, :]
         heatmap = img2ch[1, :, :]
-        # Convert grayscale to numpy và denormalize nếu cần
+        # Convert grayscale to numpy và denormalize 
         gray_np = gray.numpy()
-        # Denormalize grayscale nếu cần (điều chỉnh theo cách bạn đã chuẩn hóa dữ liệu)
+        # Denormalize grayscale 
         # Ví dụ: gray_np = gray_np * 0.225 + 0.485
         # Convert heatmap to numpy
         hm_np = heatmap.numpy()
@@ -290,9 +290,9 @@ def modified_manet_with_pretrain(num_classes=7):
     if list(pre_trained_dict.keys())[0].startswith('module.'):
         # Nếu có, xóa 'module.' prefix
         pre_trained_dict = {k.replace('module.', ''): v for k, v in pre_trained_dict.items()}
-    # Thử tải weights với strict=False để bỏ qua các key không khớp
+    # tải weights với strict=False để bỏ qua các key không khớp
     model.load_state_dict(pre_trained_dict, strict=False)        
-    # Giờ hãy sửa lớp conv1 để hỗ trợ 2 channels
+    #  sửa lớp conv1 để hỗ trợ 2 channels
     original_conv = model.conv1
     # Tạo lớp conv mới với 2 kênh đầu vào
     new_conv = nn.Conv2d(
